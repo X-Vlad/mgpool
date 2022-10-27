@@ -466,12 +466,17 @@ class Pool:
         else:
             logger.debug('Hook %r returned %d: %r', hook, proc.returncode, stdout)
 
-    def set_healthy_node(self):
+    def set_healthy_node(self, switch=False):
         higher_peak = None
         cur_node = None
         for node in self.nodes:
             if not (node['blockchain_state'].get('sync') or {}).get('synced'):
+                logger.warning('Node %r not synced', node['hostname'])
                 continue
+            if switch is True:
+                # If we are switching always choose a different one
+                if node['rpc_client'] == self.node_rpc_client:
+                    continue
             if higher_peak is None:
                 higher_peak = node['blockchain_state']['peak'].height
                 cur_node = node
@@ -712,6 +717,7 @@ class Pool:
                             f"Singleton coin {singleton_coin_record.coin.name()} is spent, will not "
                             f"claim rewards"
                         )
+                        farmers_seen.add(rec.launcher_id)
                         continue
 
                     try:
@@ -893,6 +899,16 @@ class Pool:
                         hook_args.append((reward, farmer))
 
                         await self.store.add_block(
+                            reward,
+                            0,
+                            singleton,
+                            farmer,
+                            launcher_etw,
+                            launcher_effort,
+                            pool_size,
+                            pool_etw,
+                        )
+                        await self.store_ts.add_block(
                             reward,
                             0,
                             singleton,
@@ -1523,7 +1539,7 @@ class Pool:
             response_dict['payout_instructions'] = is_new_payout
 
         if updated_record != farmer_record:
-            self.log.info(
+            self.log.debug(
                 'Updated farmer record (pubkey: %r, payout: %r) for %s',
                 is_new_pubkey,
                 is_new_payout,
@@ -1699,6 +1715,20 @@ class Pool:
             return error_dict(
                 PoolErrorCode.INVALID_P2_SINGLETON_PUZZLE_HASH,
                 f"Invalid pool contract puzzle hash {partial.payload.proof_of_space.pool_contract_puzzle_hash}",
+            )
+
+        # No version means <= 1.2
+        if req_metadata and not req_metadata.get_chia_version():
+            await self.partials.add_partial(
+                partial.payload,
+                req_metadata,
+                time_received_partial,
+                farmer_record.difficulty,
+                'INVALID_VERSION',
+            )
+            return error_dict(
+                PoolErrorCode.REQUEST_FAILED,
+                "Invalid version, make sure to use client version 1.3 or higher.",
             )
 
         response = await self.get_signage_point_or_eos(partial)
